@@ -3,6 +3,8 @@ import tkinter as tk
 from tkinter import ttk, filedialog
 from dataclasses import dataclass
 
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
+
 LILAC = "#C8A2C8"
 MMAP_THRESHOLD = 50 * 1024 * 1024  # 50 MB
 
