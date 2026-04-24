@@ -1,22 +1,15 @@
-import os, zlib, re, threading, mmap
+import json, os, re, subprocess, threading
 import tkinter as tk
-from tkinter import ttk, filedialog
-from dataclasses import dataclass
+from tkinter import filedialog, ttk
 
-os.chdir(os.path.dirname(os.path.abspath(__file__)))
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+os.chdir(SCRIPT_DIR)
 
 LILAC = "#C8A2C8"
-MMAP_THRESHOLD = 50 * 1024 * 1024  # 50 MB
+RESULTS_FILENAME = "scan_results.txt"
+SCANNER_EXE_NAME = "aldnoah_scanner.exe"
+TEXT_ENCODINGS = ("utf-8", "shift_jis", "big5")
 
-"""
-My attempt at a professional level binary file scanner, best used when needing to scan large amounts of files
-for strings/data. It's way faster than you opening thousands of files in a hex editor one by one to find what you need.
-
-"""
-@dataclass
-class ScanProgress:
-    files_scanned: int = 0
-    hits: int = 0
 
 def setup_lilac_styles():
     style = ttk.Style()
@@ -24,431 +17,218 @@ def setup_lilac_styles():
         style.theme_use("clam")
     except tk.TclError:
         pass
-    style.configure("Lilac.TFrame",  background=LILAC)
-    style.configure("Lilac.TLabel",  background=LILAC, foreground="black", padding=0)
+    style.configure("Lilac.TFrame", background=LILAC)
+    style.configure("Lilac.TLabel", background=LILAC, foreground="black", padding=0)
     style.map("Lilac.TLabel", background=[("active", LILAC)])
 
-def parse_hex_pattern(s: str) -> bytes:
-    """
-    Accepts inputs like 01 02 0A or 01020A and returns b'\\x01\\x02\\x0A'
-    """
-    cleaned = s.replace(" ", "").replace("_", "")
+
+def normalize_hex_pattern(value: str) -> str:
+    cleaned = re.sub(r"[\s_]+", "", value).upper()
+    if not cleaned:
+        raise ValueError("Pattern cannot be empty.")
     if len(cleaned) % 2 != 0:
-        raise ValueError("Hex string length must be even")
-    try:
-        return bytes.fromhex(cleaned)
-    except ValueError as e:
-        raise ValueError(f"Invalid hex string: {e}")
+        raise ValueError("Hex string length must be even.")
 
-def prepare_hex_pattern_with_wildcards(s: str):
-    """
-    Accepts things like 01 02 ?? 04 or 0102??04 and returns pattern_bytes, mask_bytes, and has_wildcards
-    mask_bytes[i] == 1 -> byte must match exactly
-    mask_bytes[i] == 0 -> wildcard (any byte)
-    """
-    cleaned = s.replace(" ", "").replace("_", "")
-    if len(cleaned) % 2 != 0:
-        raise ValueError("Hex string length must be even")
-
-    pattern = []
-    mask = []
-    has_wild = False
-
-    for i in range(0, len(cleaned), 2):
-        pair = cleaned[i:i+2]
+    for idx in range(0, len(cleaned), 2):
+        pair = cleaned[idx:idx + 2]
         if pair == "??":
-            pattern.append(0)
-            mask.append(0)     # wildcard
-            has_wild = True
-        else:
-            try:
-                value = int(pair, 16)
-            except ValueError as e:
-                raise ValueError(f"Invalid hex pair '{pair}': {e}")
-            pattern.append(value)
-            mask.append(1)  # real byte must match
+            continue
+        try:
+            int(pair, 16)
+        except ValueError as exc:
+            raise ValueError(f"Invalid hex pair '{pair}'.") from exc
 
-    return bytes(pattern), bytes(mask), has_wild
+    return cleaned
 
-def find_wildcard_matches(data: bytes, pattern: bytes, mask: bytes):
-    """
-    Returns all indices where pattern matches data using mask, 1 = exact byte while 0 = wildcard
-    Also uses an anchor based search for speed
-    """
-    hits = []
-    n = len(data)
-    m = len(pattern)
 
-    if m == 0 or n < m:
-        return hits
+def encode_text_pattern(value: str, encoding: str) -> str:
+    try:
+        return value.encode(encoding, errors="strict").hex().upper()
+    except LookupError as exc:
+        raise ValueError(f"Unsupported encoding: {encoding}") from exc
+    except UnicodeEncodeError as exc:
+        raise ValueError(str(exc)) from exc
 
-    mv = memoryview(data)
 
-    anchor_start, anchor_len = _find_best_anchor(pattern, mask)
+def resolve_scanner_command():
+    exe_path = os.path.join(SCRIPT_DIR, SCANNER_EXE_NAME)
+    if os.path.isfile(exe_path):
+        return [exe_path], exe_path
 
-    if anchor_len == 0:
-        return hits
+    raise FileNotFoundError(
+        f"Could not find {SCANNER_EXE_NAME} in {SCRIPT_DIR}."
+    )
 
-    anchor = bytes(pattern[anchor_start:anchor_start + anchor_len])
-
-    search_pos = 0
-    while True:
-        idx = mv.find(anchor, search_pos)
-        if idx == -1:
-            break
-
-        candidate = idx - anchor_start
-
-        if 0 <= candidate and candidate + m <= n:
-            ok = True
-            for j in range(m):
-                if mask[j] and mv[candidate + j] != pattern[j]:
-                    ok = False
-                    break
-            if ok:
-                hits.append(candidate)
-
-        search_pos = idx + 1
-
-    return hits
-
-def _find_best_anchor(pattern: bytes, mask: bytes):
-    """
-    Find the longest contiguous run of non-wildcard bytes
-    Returns anchor_start and anchor_len
-    If there are no non-wildcard bytes, anchor_len will be 0
-    """
-    best_start = 0
-    best_len = 0
-    cur_start = 0
-    cur_len = 0
-
-    for i, m in enumerate(mask):
-        if m:
-            if cur_len == 0:
-                cur_start = i
-            cur_len += 1
-            if cur_len > best_len:
-                best_len = cur_len
-                best_start = cur_start
-        else:
-            cur_len = 0
-
-    return best_start, best_len
-
-def build_wildcard_regex(pattern: bytes, mask: bytes):
-    """
-    Build a bytes regex from pattern and mask
-    mask[i] == 1 -> that byte must match exactly
-    mask[i] == 0 -> wildcard '??' -> '.'
-    Returns a compiled regex or None if everything is wildcard
-    """
-    if not any(mask):
-        return None
-
-    parts = []
-    for b, m in zip(pattern, mask):
-        if m:
-            parts.append(re.escape(bytes([b])))
-        else:
-            parts.append(b'.')
-
-    regex_bytes = b''.join(parts)
-    return re.compile(regex_bytes, re.DOTALL)
-
-def get_search_bytes(mode: str, user_input: str, encoding: str = "utf-8") -> bytes:
-    if mode == "hex":
-        return parse_hex_pattern(user_input)
-    else:
-        return user_input.encode(encoding, errors="strict")
-
-def scan_files(root_dir: str, target_bytes: bytes, out_path: str,
-               progress: "ScanProgress | None" = None):
-    """
-    Recursively scan root_dir for target_bytes
-    Uses mmap for large files to avoid loading them fully into RAM
-    Writes results to out_path too incase anybody would like a file documenting the results
-    """
-    hits = 0
-    files_checked = 0
-
-    with open(out_path, "w", encoding="utf-8") as log:
-        log.write(f"Search root: {root_dir}\n")
-        log.write(f"Searched bytes (hex): {target_bytes.hex().upper()}\n\n")
-
-        for dirpath, dirnames, filenames in os.walk(root_dir):
-            for fname in filenames:
-                fpath = os.path.join(dirpath, fname)
-
-                try:
-                    size = os.path.getsize(fpath)
-                except OSError:
-                    continue
-
-                if size == 0:
-                    continue
-
-                files_checked += 1
-                if progress is not None:
-                    progress.files_scanned += 1
-
-                try:
-                    with open(fpath, "rb") as f:
-                        if size >= MMAP_THRESHOLD:
-                            try:
-                                with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
-                                    data = mm
-                                    start = 0
-                                    local_found = False
-                                    while True:
-                                        idx = data.find(target_bytes, start)
-                                        if idx == -1:
-                                            break
-                                        if not local_found:
-                                            log.write(f"FILE: {fpath}\n")
-                                            local_found = True
-                                        hits += 1
-                                        if progress is not None:
-                                            progress.hits += 1
-                                        log.write(f"  offset: 0x{idx:X} ({idx} decimal)\n")
-                                        start = idx + 1
-                                    if local_found:
-                                        log.write("\n")
-                            except (OSError, ValueError):
-                                continue
-                        else:
-                            data = f.read()
-                            start = 0
-                            local_found = False
-                            while True:
-                                idx = data.find(target_bytes, start)
-                                if idx == -1:
-                                    break
-                                if not local_found:
-                                    log.write(f"FILE: {fpath}\n")
-                                    local_found = True
-                                hits += 1
-                                if progress is not None:
-                                    progress.hits += 1
-                                log.write(f"  offset: 0x{idx:X} ({idx} decimal)\n")
-                                start = idx + 1
-                            if local_found:
-                                log.write("\n")
-                except (OSError, IOError):
-                    continue
-
-        log.write(f"---\nFiles scanned: {files_checked}, total hits: {hits}\n")
-
-def scan_files_wildcards(root_dir: str, pat_len: int, regex, out_path: str,
-                         progress: "ScanProgress | None" = None):
-    """
-    Wildcard scan using a compiled bytes regex for speed
-    Uses mmap for large files
-    pat_len is the pattern length in bytes for quick size check
-    regex is the compiled pattern from build_wildcard_regex()
-    """
-    hits = 0
-    files_checked = 0
-
-    with open(out_path, "w", encoding="utf-8") as log:
-        log.write(f"Search root: {root_dir}\n")
-        log.write(f"Pattern length: {pat_len} bytes\n")
-        log.write("Wildcards: '??' match any byte.\n\n")
-
-        for dirpath, dirnames, filenames in os.walk(root_dir):
-            for fname in filenames:
-                fpath = os.path.join(dirpath, fname)
-
-                try:
-                    size = os.path.getsize(fpath)
-                except OSError:
-                    continue
-
-                if size < pat_len:
-                    continue
-
-                files_checked += 1
-                if progress is not None:
-                    progress.files_scanned += 1
-
-                try:
-                    with open(fpath, "rb") as f:
-                        if size >= MMAP_THRESHOLD:
-                            try:
-                                with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
-                                    matches = list(regex.finditer(mm))
-                            except (OSError, ValueError):
-                                continue
-                        else:
-                            data = f.read()
-                            matches = list(regex.finditer(data))
-                except (OSError, IOError):
-                    continue
-
-                if matches:
-                    log.write(f"FILE: {fpath}\n")
-                    for m in matches:
-                        idx = m.start()
-                        hits += 1
-                        if progress is not None:
-                            progress.hits += 1
-                        log.write(f"  offset: 0x{idx:X} ({idx} decimal)\n")
-                    log.write("\n")
-
-        log.write(f"---\nFiles scanned: {files_checked}, total hits: {hits}\n")
 
 class Scanner:
     def __init__(self, root):
         self.root = root
         self.root.title("Aldnoah Batch File Scanner")
-        self.root.geometry("1250x700")
+        self.root.geometry("1250x730")
         self.root.resizable(False, False)
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         setup_lilac_styles()
 
-        # state vars
         self.dir_var = tk.StringVar(value="No directory selected")
-        self.mode_var = tk.StringVar(value="hex")  # hex or text
+        self.mode_var = tk.StringVar(value="hex")
         self.pattern_var = tk.StringVar()
-
-        # Encoding combobox var. defaults to first item which is utf-8
         self.encoding_var = tk.StringVar(value="utf-8")
-
-        self.status_var = tk.StringVar(value="Idle")
         self.comp_var = tk.StringVar(value="none")
         self.zlib_level_var = tk.IntVar(value=6)
 
-        self.progress = None
-        self._progress_running = False
+        self.status_var = tk.StringVar(value="Idle")
+        self.progress_label_var = tk.StringVar(value="Progress: waiting to start.")
+        self.current_file_var = tk.StringVar(value="Current file: none")
+
+        self.scan_running = False
+        self.total_files = 0
+        self.current_results_path = os.path.join(SCRIPT_DIR, RESULTS_FILENAME)
+        self.current_process = None
+        self._done_event_received = False
+        self._error_event_received = False
+        self._counting_started = False
 
         self.build_gui()
 
-    def _update_progress(self):
-        if not self._progress_running:
-            return
-
-        if self.progress is not None:
-            self.status_var.set(
-                f"Scanning... Files scanned: {self.progress.files_scanned}, "
-                f"hits: {self.progress.hits}"
-            )
-
-        self.root.after(200, self._update_progress)
-
     def build_gui(self):
-        """Handles the buildong of the GUI design"""
         self.bg = ttk.Frame(self.root, style="Lilac.TFrame")
         self.bg.place(x=0, y=0, relwidth=1, relheight=1)
 
-        open_btn = ttk.Button(
+        self.open_btn = ttk.Button(
             self.bg,
             text="Select directory to scan",
-            command=self.select_directory
+            command=self.select_directory,
         )
-        open_btn.place(x=20, y=20)
+        self.open_btn.place(x=20, y=20)
 
         dir_label = ttk.Label(
             self.bg,
             textvariable=self.dir_var,
-            style="Lilac.TLabel"
+            style="Lilac.TLabel",
         )
         dir_label.place(x=240, y=24)
 
         mode_label = ttk.Label(self.bg, text="Search mode:", style="Lilac.TLabel")
         mode_label.place(x=20, y=60)
 
-        hex_radio = ttk.Radiobutton(
+        self.hex_radio = ttk.Radiobutton(
             self.bg,
             text="Hex",
             variable=self.mode_var,
             value="hex",
-            command=self._update_encoding_state
+            command=self.update_encoding_state,
         )
-        hex_radio.place(x=120, y=60)
+        self.hex_radio.place(x=120, y=60)
 
-        text_radio = ttk.Radiobutton(
+        self.text_radio = ttk.Radiobutton(
             self.bg,
             text="Text",
             variable=self.mode_var,
             value="text",
-            command=self._update_encoding_state
+            command=self.update_encoding_state,
         )
-        text_radio.place(x=180, y=60)
+        self.text_radio.place(x=180, y=60)
 
         patt_label = ttk.Label(self.bg, text="Pattern:", style="Lilac.TLabel")
         patt_label.place(x=20, y=100)
 
-        patt_entry = ttk.Entry(self.bg, textvariable=self.pattern_var, width=60)
-        patt_entry.place(x=90, y=100)
+        self.pattern_entry = ttk.Entry(self.bg, textvariable=self.pattern_var, width=60)
+        self.pattern_entry.place(x=90, y=100)
 
-        paste_btn = ttk.Button(
+        self.paste_btn = ttk.Button(
             self.bg,
             text="Paste",
-            command=self.paste_pattern_from_clipboard
+            command=self.paste_pattern_from_clipboard,
         )
-        paste_btn.place(x=700, y=96)
+        self.paste_btn.place(x=700, y=96)
 
         enc_label = ttk.Label(self.bg, text="Encoding (text mode):", style="Lilac.TLabel")
         enc_label.place(x=20, y=140)
 
-        enc_box = ttk.Combobox(
+        self.enc_box = ttk.Combobox(
             self.bg,
             textvariable=self.encoding_var,
-            values=("utf-8", "shift_jis", "big5"),
+            values=TEXT_ENCODINGS,
             state="readonly",
-            width=12
+            width=12,
         )
-        enc_box.place(x=170, y=140)
+        self.enc_box.place(x=170, y=140)
 
-        self.enc_box = enc_box  # for enable and disabling based on mode
-
-        # Compression mode, incase someone needs to search a compressed string or bytes
         comp_label = ttk.Label(self.bg, text="Compression:", style="Lilac.TLabel")
         comp_label.place(x=340, y=140)
 
-        comp_box = ttk.Combobox(
+        self.comp_box = ttk.Combobox(
             self.bg,
             textvariable=self.comp_var,
             values=("none", "zlib"),
             state="readonly",
-            width=10
+            width=10,
         )
-        comp_box.place(x=430, y=140)
+        self.comp_box.place(x=430, y=140)
 
         level_label = ttk.Label(self.bg, text="Level:", style="Lilac.TLabel")
         level_label.place(x=540, y=140)
 
-        level_spin = ttk.Spinbox(
+        self.level_spin = ttk.Spinbox(
             self.bg,
             from_=1,
             to=9,
             textvariable=self.zlib_level_var,
-            width=3
+            width=3,
         )
-        level_spin.place(x=600, y=140)
+        self.level_spin.place(x=600, y=140)
 
         self.scan_btn = ttk.Button(
             self.bg,
             text="Start Scan",
             command=self.start_scan,
-            state=tk.DISABLED
+            state=tk.DISABLED,
         )
         self.scan_btn.place(x=20, y=180)
 
         status_label = ttk.Label(self.bg, textvariable=self.status_var, style="Lilac.TLabel")
         status_label.place(x=130, y=184)
 
+        progress_label = ttk.Label(
+            self.bg,
+            textvariable=self.progress_label_var,
+            style="Lilac.TLabel",
+        )
+        progress_label.place(x=20, y=214)
+
+        current_file_label = ttk.Label(
+            self.bg,
+            textvariable=self.current_file_var,
+            style="Lilac.TLabel",
+        )
+        current_file_label.place(x=20, y=234)
+
+        self.progress_bar = ttk.Progressbar(
+            self.bg,
+            orient="horizontal",
+            mode="determinate",
+            maximum=100,
+            length=960,
+        )
+        self.progress_bar.place(x=260, y=234, width=960)
+
         self.result_text = tk.Text(self.bg, wrap="none")
-        self.result_text.place(x=20, y=220, width=1210, height=450)
+        self.result_text.place(x=20, y=270, width=1210, height=410)
 
         scroll_y = tk.Scrollbar(self.bg, orient="vertical", command=self.result_text.yview)
-        scroll_y.place(x=1230, y=220, height=450)
+        scroll_y.place(x=1230, y=270, height=410)
 
-        self.result_text.configure(yscrollcommand=scroll_y.set)
+        scroll_x = tk.Scrollbar(self.bg, orient="horizontal", command=self.result_text.xview)
+        scroll_x.place(x=20, y=680, width=1210)
 
-        self.pattern_var.trace_add("write", self._update_scan_button_state)
+        self.result_text.configure(
+            yscrollcommand=scroll_y.set,
+            xscrollcommand=scroll_x.set,
+        )
 
-        self._update_encoding_state()
+        self.pattern_var.trace_add("write", self.update_scan_button_state)
+        self.update_encoding_state()
 
     def paste_pattern_from_clipboard(self):
         try:
@@ -458,26 +238,10 @@ class Scanner:
             return
 
         text = text.strip()
-
         if self.mode_var.get() == "hex":
-            allowed = "0123456789ABCDEFabcdef? "
-            cleaned_chars = []
-            for ch in text:
-                if ch in allowed:
-                    cleaned_chars.append(ch)
-            cleaned = "".join(cleaned_chars)
-
-            normalized = []
-            last_space = False
-            for ch in cleaned:
-                if ch == " ":
-                    if not last_space:
-                        normalized.append(" ")
-                        last_space = True
-                else:
-                    normalized.append(ch)
-                    last_space = False
-            text = "".join(normalized).strip()
+            allowed = "0123456789ABCDEFabcdef? \t\r\n_"
+            text = "".join(ch for ch in text if ch in allowed)
+            text = re.sub(r"\s+", " ", text).strip()
 
         self.pattern_var.set(text)
         self.status_var.set("Pattern pasted from clipboard.")
@@ -486,130 +250,324 @@ class Scanner:
         path = filedialog.askdirectory()
         if path:
             self.dir_var.set(path)
-        self._update_scan_button_state()
+        self.update_scan_button_state()
 
-    def _update_scan_button_state(self, *args):
+    def set_controls_for_scan(self, running: bool):
+        button_state = tk.DISABLED if running else tk.NORMAL
+        radio_state = tk.DISABLED if running else tk.NORMAL
+        entry_state = tk.DISABLED if running else tk.NORMAL
+        spin_state = tk.DISABLED if running else tk.NORMAL
+        combo_state = "disabled" if running else "readonly"
+
+        self.open_btn.config(state=button_state)
+        self.hex_radio.config(state=radio_state)
+        self.text_radio.config(state=radio_state)
+        self.pattern_entry.config(state=entry_state)
+        self.paste_btn.config(state=button_state)
+        self.comp_box.config(state=combo_state)
+        self.level_spin.config(state=spin_state)
+
+        if running:
+            self.enc_box.config(state="disabled")
+            self.scan_btn.config(state=tk.DISABLED)
+        else:
+            self.update_encoding_state()
+            self.update_scan_button_state()
+
+    def update_scan_button_state(self, *args):
+        if self.scan_running:
+            self.scan_btn.config(state=tk.DISABLED)
+            return
+
         dir_ok = os.path.isdir(self.dir_var.get())
         patt_ok = bool(self.pattern_var.get().strip())
-        if dir_ok and patt_ok:
-            self.scan_btn.config(state=tk.NORMAL)
-        else:
-            self.scan_btn.config(state=tk.DISABLED)
+        self.scan_btn.config(state=tk.NORMAL if dir_ok and patt_ok else tk.DISABLED)
 
-    def _update_encoding_state(self, *args):
-        """Disable encoding selection in hex mode"""
+    def update_encoding_state(self, *args):
         if getattr(self, "enc_box", None) is None:
+            return
+        if self.scan_running:
+            self.enc_box.config(state="disabled")
             return
         if self.mode_var.get() == "hex":
             self.enc_box.config(state="disabled")
         else:
             self.enc_box.config(state="readonly")
 
-    def start_scan(self):
+    def prepare_request(self):
         root_dir = self.dir_var.get()
         pattern_str = self.pattern_var.get().strip()
         mode = self.mode_var.get()
         encoding = self.encoding_var.get().strip() or "utf-8"
+        compression = self.comp_var.get()
 
         if not os.path.isdir(root_dir):
-            self.status_var.set("Please select a valid directory.")
-            return
+            raise ValueError("Please select a valid directory.")
         if not pattern_str:
-            self.status_var.set("Please enter a pattern.")
-            return
-
-        use_wildcards = False
-        mask_bytes = None
+            raise ValueError("Please enter a pattern.")
 
         try:
-            if mode == "hex":
-                pattern_bytes, mask_bytes, has_wild = prepare_hex_pattern_with_wildcards(pattern_str)
-                use_wildcards = has_wild
-                base_bytes = pattern_bytes
-            else:
-                base_bytes = get_search_bytes("text", pattern_str, encoding)
-        except ValueError as e:
-            self.status_var.set(f"Error: {e}")
+            zlib_level = int(self.zlib_level_var.get())
+        except (TypeError, ValueError):
+            zlib_level = 6
+
+        if not 1 <= zlib_level <= 9:
+            zlib_level = 6
+
+        if mode == "hex":
+            pattern_hex = normalize_hex_pattern(pattern_str)
+        else:
+            pattern_hex = encode_text_pattern(pattern_str, encoding)
+
+        return {
+            "root_dir": root_dir,
+            "mode": mode,
+            "encoding": encoding,
+            "compression": compression,
+            "zlib_level": zlib_level,
+            "pattern_hex": pattern_hex,
+            "pattern_display": pattern_str,
+            "results_path": self.current_results_path,
+        }
+
+    def start_counting_ui(self):
+        if self._counting_started:
             return
+        self._counting_started = True
+        self.progress_bar.stop()
+        self.progress_bar.configure(mode="indeterminate")
+        self.progress_bar.start(10)
+        self.progress_label_var.set("Counting files")
+        self.status_var.set("Counting files")
+        self.current_file_var.set("Current file: building file list")
 
-        comp_mode = self.comp_var.get()
+    def start_scanning_ui(self, total_files: int):
+        self.total_files = total_files
+        self.progress_bar.stop()
+        self.progress_bar.configure(mode="determinate", maximum=100)
+        self.progress_bar["value"] = 0
+        self.progress_label_var.set(f"0 / {total_files:,} files (0.00%)")
+        self.status_var.set("Scanning")
+        self.current_file_var.set("Current file: waiting for worker activity")
 
-        if mode == "hex" and use_wildcards and comp_mode != "none":
-            self.status_var.set("Wildcards are only supported with uncompressed hex search.")
-            return
+    def shorten_path(self, value: str, limit: int = 140) -> str:
+        if len(value) <= limit:
+            return value
+        keep = max(20, (limit - 3) // 2)
+        return f"{value[:keep]}{value[-keep:]}"
 
+    def update_progress_ui(
+        self,
+        files_scanned: int,
+        total_files: int,
+        hits: int,
+        percent: float,
+        current_file: str = "",
+    ):
+        self.progress_bar["value"] = max(0.0, min(percent, 100.0))
+        self.progress_label_var.set(
+            f"{files_scanned:,} / {total_files:,} files ({percent:.2f}%)"
+        )
+        self.status_var.set(
+            f"Scanning Files: {files_scanned:,}/{total_files:,} Hits: {hits:,}"
+        )
+        if current_file:
+            self.current_file_var.set(
+                f"Current file: {self.shorten_path(current_file)}"
+            )
+
+    def load_results_into_text(self):
         try:
-            if comp_mode == "zlib":
-                try:
-                    level = int(self.zlib_level_var.get())
-                except (TypeError, ValueError):
-                    level = 6
-
-                if level < 1 or level > 9:
-                    level = 6
-
-                target_bytes = zlib.compress(base_bytes, level)
-            else:
-                target_bytes = base_bytes
-        except Exception as e:
-            self.status_var.set(f"Compression error: {e}")
-            return
-
-        out_path = os.path.join(os.getcwd(), "scan_results.txt")
+            with open(self.current_results_path, "r", encoding="utf-8") as handle:
+                content = handle.read()
+        except OSError:
+            content = (
+                "Scan finished, but the results file could not be read:\n"
+                f"{self.current_results_path}"
+            )
 
         self.result_text.delete("1.0", tk.END)
-        self.status_var.set("Scanning...")
-        self.scan_btn.config(state=tk.DISABLED)
+        self.result_text.insert(tk.END, content)
+        self.result_text.see("1.0")
 
-        self.progress = ScanProgress()
-        self._progress_running = True
-        self._update_progress()
+    def handle_scanner_event(self, event):
+        event_type = event.get("type")
+        if event_type == "counting":
+            self.start_counting_ui()
+            files_counted = int(event.get("files_counted", 0))
+            self.progress_label_var.set(f"Counting files {files_counted:,} found so far")
+            self.status_var.set(f"Counting files {files_counted:,} found so far")
+            return
 
-        wildcard_regex = None
-        pat_len = len(base_bytes)
-        if mode == "hex" and use_wildcards:
-            wildcard_regex = build_wildcard_regex(base_bytes, mask_bytes)
-            if wildcard_regex is None:
-                self.status_var.set("Pattern is all wildcards, refusing to match everything.")
-                self.scan_btn.config(state=tk.NORMAL)
-                return
+        if event_type == "start":
+            total_files = int(event.get("total_files", 0))
+            self.current_results_path = event.get("results_path", self.current_results_path)
+            self.start_scanning_ui(total_files)
+            return
 
-        def worker():
-            if mode == "hex" and use_wildcards:
-                scan_files_wildcards(root_dir, pat_len, wildcard_regex, out_path, self.progress)
-            else:
-                scan_files(root_dir, target_bytes, out_path, self.progress)
+        if event_type == "progress":
+            files_scanned = int(event.get("files_scanned", 0))
+            total_files = int(event.get("total_files", self.total_files))
+            hits = int(event.get("hits", 0))
+            percent = float(event.get("percent", 0.0))
+            current_file = event.get("current_file", "")
+            self.update_progress_ui(
+                files_scanned,
+                total_files,
+                hits,
+                percent,
+                current_file,
+            )
+            return
 
-            self._progress_running = False
+        if event_type == "done":
+            self._done_event_received = True
+            files_scanned = int(event.get("files_scanned", 0))
+            total_files = int(event.get("total_files", self.total_files))
+            hits = int(event.get("hits", 0))
+            percent = float(event.get("percent", 100.0))
+            self.update_progress_ui(files_scanned, total_files, hits, percent)
+            self.current_results_path = event.get("results_path", self.current_results_path)
+            self.load_results_into_text()
+            self.status_var.set(
+                f"Done. Files: {files_scanned:,}/{total_files:,} Hits: {hits:,}. "
+                f"Results saved to: {self.current_results_path}"
+            )
+            self.current_file_var.set("Current file: scan complete")
+            return
 
-            def on_done():
-                try:
-                    with open(out_path, "r", encoding="utf-8") as f:
-                        content = f.read()
-                except OSError:
-                    content = f"Scan complete, but could not read log file:\n{out_path}"
+        if event_type == "error":
+            self._error_event_received = True
+            message = event.get("message", "Scanner error.")
+            self.progress_bar.stop()
+            self.progress_bar.configure(mode="determinate", maximum=100)
+            self.status_var.set(f"Error: {message}")
+            self.current_file_var.set("Current file: scanner stopped")
+            self.result_text.insert(tk.END, f"ERROR: {message}\n")
+            self.result_text.see(tk.END)
 
-                self.result_text.insert(tk.END, content)
-                if self.progress is not None:
-                    self.status_var.set(
-                        f"Done. Files: {self.progress.files_scanned}, "
-                        f"hits: {self.progress.hits}. "
-                        f"Results saved to: {out_path}"
-                    )
-                else:
-                    self.status_var.set(f"Done. Results saved to: {out_path}")
+    def finalize_scan(self, returncode: int, stderr_output: str):
+        self.scan_running = False
+        self.current_process = None
+        self.progress_bar.stop()
+        self.progress_bar.configure(mode="determinate", maximum=100)
+        self.set_controls_for_scan(False)
 
-                self.scan_btn.config(state=tk.NORMAL)
+        if self._done_event_received or self._error_event_received:
+            return
 
-            self.root.after(0, on_done)
+        if returncode == 0:
+            message = "Scanner finished without sending a completion message."
+        else:
+            message = stderr_output.strip() or f"Scanner exited with code {returncode}."
 
-        t = threading.Thread(target=worker, daemon=True)
-        t.start()
+        self.status_var.set(f"Error: {message}")
+        self.result_text.insert(tk.END, f"ERROR: {message}\n")
+        self.result_text.see(tk.END)
+
+    def scanner_worker(self, request):
+        stderr_output = ""
+        returncode = 1
+
+        try:
+            command, _ = resolve_scanner_command()
+
+            creationflags = 0
+            startupinfo = None
+            if os.name == "nt":
+                creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                if hasattr(subprocess, "SW_HIDE"):
+                    startupinfo.wShowWindow = subprocess.SW_HIDE
+
+            proc = subprocess.Popen(
+                [*command, "--json"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                bufsize=1,
+                creationflags=creationflags,
+                startupinfo=startupinfo,
+            )
+            self.current_process = proc
+
+            if proc.stdin is not None:
+                proc.stdin.write(json.dumps(request))
+                proc.stdin.close()
+
+            if proc.stdout is not None:
+                for line in proc.stdout:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    self.root.after(0, self.handle_scanner_event, event)
+
+            if proc.stderr is not None:
+                stderr_output = proc.stderr.read()
+
+            returncode = proc.wait()
+        except Exception as exc:
+            self.root.after(
+                0,
+                self.handle_scanner_event,
+                {"type": "error", "message": str(exc)},
+            )
+            self._error_event_received = True
+        finally:
+            self.root.after(0, self.finalize_scan, returncode, stderr_output)
+
+    def start_scan(self):
+        if self.scan_running:
+            return
+
+        self.current_results_path = os.path.join(SCRIPT_DIR, RESULTS_FILENAME)
+
+        try:
+            request = self.prepare_request()
+        except ValueError as exc:
+            self.status_var.set(str(exc))
+            return
+
+        self.scan_running = True
+        self.total_files = 0
+        self._done_event_received = False
+        self._error_event_received = False
+        self._counting_started = False
+
+        self.result_text.delete("1.0", tk.END)
+        self.progress_bar.stop()
+        self.progress_bar.configure(mode="determinate", maximum=100)
+        self.progress_bar["value"] = 0
+        self.progress_label_var.set("Waiting for scanner")
+        self.current_file_var.set("Current file: starting scanner")
+        self.status_var.set("Starting scanner")
+        self.set_controls_for_scan(True)
+
+        thread = threading.Thread(target=self.scanner_worker, args=(request,), daemon=True)
+        thread.start()
+
+    def on_close(self):
+        proc = self.current_process
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+        self.root.destroy()
+
 
 def main():
     root = tk.Tk()
-    checker = Scanner(root)
+    Scanner(root)
     root.mainloop()
+
 
 if __name__ == "__main__":
     main()

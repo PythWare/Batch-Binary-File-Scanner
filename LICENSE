@@ -1,21 +1,26 @@
-MIT License
+Batch Binary File Scanner License (Non-Commercial, No Redistribution)
 
-Copyright (c) 2025 PythWare
+Permission (Personal Use Only)
+You may use and modify this software for personal, non-commercial purposes.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+Forks/Contributions
+You may fork this repository on Github for personal use and/or to submit pull requests. Any contribution you submit may be incorporated into the project at the author’s discretion.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+Prohibited Uses
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+You may not, without prior written permission from the author:
+
+Use the software for commercial purposes, including but not limited to selling, licensing, monetizing, or offering it as part of a paid product or service.
+
+Monetize access to the software or its outputs (e.g., paywalls, supporter only releases, paid modpacks/tools, early access, etc).
+
+Distribute, publish, or re-release the software or any modified version/fork (source or binary), except via a pull request to this repository.
+
+Definition for Commercial
+
+“Commercial purposes” means use primarily intended for or directed toward commercial advantage or monetary compensation. 
+
+No Warranty/Liability
+
+This software is provided as is, without warranty of any kind. You assume all risk for use. The author is not liable for damages, data loss, bans, or other consequences resulting from use.
+
