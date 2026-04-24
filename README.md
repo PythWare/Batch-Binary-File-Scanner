@@ -15,9 +15,15 @@ You need Python 3 installed to use this, keep the pyw file in the same directory
 
 I am using python for the GUI while Dart does the bulk of the batch binary scanning. Essentially? By having a lot of the heavy work done by Dart, the scanning becomes significantly faster.
 
+# Example of Dart/Python Version
+
+<img width="1255" height="770" alt="bat1" src="https://github.com/user-attachments/assets/9cfcb0d0-394b-4e07-9b84-91d55d9c5a46" />
+
 # Extra Info
 
 The Dart_Source directory is just to provide the source to the Dart code, you don't actually use the .dart file, instead you use the pyw file and python will automatically call the executable version (which is the compiled version of thee dart source).
+
+Aldnoah_Batch_Scanner_prev.pyw is the previous Python only version, use it if you prefer that version over the Dart/Python version.
 
 # Array of byte scan example
 ![h1](https://github.com/user-attachments/assets/0a4980fd-c217-4202-bc20-bddeda5cba09)
