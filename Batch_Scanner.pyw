@@ -438,7 +438,7 @@ def scan_files_wildcards(root_dir: str, pat_len: int, regex, out_path: str,
 class Scanner:
     def __init__(self, root):
         self.root = root
-        self.root.title("Kybernes Batch File Scanner")
+        self.root.title("Kybernes Batch Binary File Scanner")
         self.root.geometry("1250x700")
         self.root.resizable(False, False)
 
