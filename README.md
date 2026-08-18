@@ -1,5 +1,6 @@
-# Batch Binary File Scanner
-This is a standalone GUI Batch Binary File Scanner I made in Python and Dart (the executable is a dart script compiled) to make finding data/text significantly easier/quicker. Instead of you having to open thousands of files 1 by 1 in a hex editor (which would be time consuming) to search for 1 thing, you can use this. 
+# Kybernes Batch Binary File Scanner
+
+This is a standalone GUI Batch Binary File Scanner I made in Python to make finding data/text significantly easier/quicker. Instead of you having to open thousands of files 1 by 1 in a hex editor (which would be time consuming) to search for 1 thing, you can use this. It even supports usage of multiprocessing, meaning you can use your extra cores to have many workers scanning to speed up the scanning.
 
 The tool will scan all files within a directory you select including subdirectories, it also tells you the file and the offsets of what you searched was found at. It accepts hex or text for searches. You can also select the character encoding to use for searching when using text searches. The current encodings I have supported are utf-8, shift-jis, and big-5. If you want support for more encodings, let me know. Shift-Jis is the most common character encoding for Japanese text in Japanese games and Big-5 for Chinese developed games, this will make finding Japanese/Chinese dialogue a lot easier if you originally had thousands of files you had to open manually, instead just type in what you want and have the scanner search for you.
 
@@ -9,30 +10,24 @@ Wildcard scanning is also supported, if you know part of the data to something b
 
 This tool can be used for any game/files. 
 
-You need Python 3 installed to use this, keep the pyw file in the same directory as the exe file (aldnoah_scanner.exe).
-
-# How it works
-
-I am using python for the GUI while Dart does the bulk of the batch binary scanning. Essentially? By having a lot of the heavy work done by Dart, the scanning becomes significantly faster.
-
-# Example of Dart/Python Version
-
-<img width="1255" height="770" alt="bat1" src="https://github.com/user-attachments/assets/9cfcb0d0-394b-4e07-9b84-91d55d9c5a46" />
+You need Python 3 installed to use this.
 
 # Extra Info
 
-The Dart_Source directory is just to provide the source to the Dart code, you don't actually use the .dart file, instead you use the pyw file and python will automatically call the executable version (which is the compiled version of thee dart source).
+Kybernes Batch File Scanner will use up to 50 MB for ram per worker. So if you only need to do a small scan and you can't spare at least a gigabyte of ram, leave CPU cores to use blank or set to 1. If you set it to 2 or higher, each worker will use up to 50 MB. Since I have 16 cores, that means 800 MB of ram would be used during the scanning with 16 workers.
 
-Aldnoah_Batch_Scanner_prev.pyw is the previous Python only version, use it if you prefer that version over the Dart/Python version.
+I suggest setting CPU cores to use when you can spare the ram because it significantly speeds up the scanning process and if you need to scan hundreds of thousands of files, it's pretty damn useful having multiple workers scanning.
 
 # Array of byte scan example
-![h1](https://github.com/user-attachments/assets/0a4980fd-c217-4202-bc20-bddeda5cba09)
+
+<img width="1251" height="731" alt="kyb2" src="https://github.com/user-attachments/assets/458781e5-644c-4a47-ae75-afc0acedb7c7" />
+
+<img width="1251" height="730" alt="kyb3" src="https://github.com/user-attachments/assets/8237d16f-5b8d-498b-a41e-1600d8c110cd" />
 
 # Wildcard searching example:
-![h2](https://github.com/user-attachments/assets/7eb449c8-9b0e-4d40-8e3c-836515fc88a6)
+
+<img width="1247" height="731" alt="kyb5" src="https://github.com/user-attachments/assets/87a5bda6-880e-4fda-8570-3036d93beac7" />
 
 # Text searching:
-![h3](https://github.com/user-attachments/assets/9894b91a-8cac-4b2b-9e37-1e689eb69057)
 
-# Shift-Jis searching example:
-![h4](https://github.com/user-attachments/assets/463d99ef-0d31-498c-afad-a1b38dfcbbb5)
+<img width="1250" height="726" alt="kyb4" src="https://github.com/user-attachments/assets/bcdafd3a-287d-4e70-9d2c-68fa06847a44" />
